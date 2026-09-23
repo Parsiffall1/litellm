@@ -28,7 +28,10 @@ class GuardrailToolParam(BaseModel):
     def _omit_null_type(  # noqa: ANN202  # annotating it replaces the model's serialization schema
         self, handler: SerializerFunctionWrapHandler
     ):
-        dumped: Final[Mapping[str, object]] = handler(self)
+        dumped: Final[Mapping[str, object]] = cast(
+            Mapping[str, object],
+            handler(self),  # pyright: ignore[reportAny]  # SerializerFunctionWrapHandler returns Any
+        )
         if dumped.get("type") is not None:
             return dumped
         return {  # mutable-ok: pydantic's json serializer rejects a mapping that is not a dict
