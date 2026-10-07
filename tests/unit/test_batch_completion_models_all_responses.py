@@ -1,7 +1,10 @@
 import concurrent.futures
+import threading
+
+import pytest
 
 import litellm
-from litellm.batch_completion.main import batch_completion_models_all_responses
+from litellm.batch_completion.main import batch_completion_models, batch_completion_models_all_responses
 
 
 def test_batch_completion_models_all_responses_submits_before_waiting(monkeypatch):
@@ -120,3 +123,56 @@ def test_batch_completion_models_all_responses_accepts_single_model_string(monke
 
     assert called_models == ["model-a"]
     assert responses == [{"model": "model-a"}]
+
+
+def test_batch_completion_models_returns_the_first_completed_response(monkeypatch):
+    """Regression test for issue #44918: a slow first-listed model must not win over a faster one."""
+    release_slow_model = threading.Event()
+
+    def _mock_completion(*args, model, **kwargs):
+        if model == "model-slow":
+            release_slow_model.wait(timeout=5)
+        return {"model": model}
+
+    monkeypatch.setattr(litellm, "completion", _mock_completion)
+
+    try:
+        response = batch_completion_models(
+            models=["model-slow", "model-fast"],
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        slow_model_still_running = not release_slow_model.is_set()
+    finally:
+        release_slow_model.set()
+
+    assert response == {"model": "model-fast"}
+    assert slow_model_still_running
+
+
+def test_batch_completion_models_skips_a_failed_model(monkeypatch):
+    def _mock_completion(*args, model, **kwargs):
+        if model == "model-error":
+            raise RuntimeError("simulated model failure")
+        return {"model": model}
+
+    monkeypatch.setattr(litellm, "completion", _mock_completion)
+
+    response = batch_completion_models(
+        models=["model-error", "model-ok"],
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert response == {"model": "model-ok"}
+
+
+def test_batch_completion_models_raises_when_every_model_fails(monkeypatch):
+    def _mock_completion(*args, model, **kwargs):
+        raise RuntimeError(f"{model} failed")
+
+    monkeypatch.setattr(litellm, "completion", _mock_completion)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        batch_completion_models(
+            models=["model-a", "model-b"],
+            messages=[{"role": "user", "content": "hello"}],
+        )

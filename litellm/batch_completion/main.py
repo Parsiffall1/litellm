@@ -1,4 +1,4 @@
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from typing import Final
 
 import litellm
@@ -148,14 +148,25 @@ def batch_completion_models(*args, **kwargs):
     if "models" in kwargs:
         models: Final = kwargs["models"]
         kwargs.pop("models")
-        futures = {}
-        with ThreadPoolExecutor(max_workers=len(models)) as executor:
-            for model in models:
-                futures[model] = executor.submit(litellm.completion, *args, model=model, **kwargs)
-
-            for model, future in sorted(futures.items(), key=lambda x: models.index(x[0])):
-                if future.result() is not None:
-                    return future.result()
+        executor: Final = ThreadPoolExecutor(max_workers=len(models))
+        model_futures: Final = tuple(
+            executor.submit(litellm.completion, *args, model=model, **kwargs) for model in models
+        )
+        first_error: Exception | None = None
+        try:
+            for future in as_completed(model_futures):
+                try:
+                    result = future.result()
+                except Exception as e:  # a failed model must not hide another model's response
+                    first_error = first_error or e
+                    continue
+                if result is not None:
+                    return result
+        finally:
+            # return as soon as one model responds instead of waiting for the slower ones
+            executor.shutdown(wait=False)
+        if first_error is not None:
+            raise first_error
     elif "deployments" in kwargs:
         deployments: Final = kwargs["deployments"]
         kwargs.pop("deployments")
